@@ -109,6 +109,106 @@ Do contact me if you are interested in adding new functions or templates to this
 
 
 
+## Figure Layout Tool
+
+sciplotlib includes a GUI and CLI tool for composing multi-panel figures from individual plots. You can arrange panels visually or define layouts in a YAML file, then export the composed figure as PDF and SVG.
+
+
+### Quick start
+
+Generate some example sub-figures, then render a layout:
+
+```bash
+# Generate example .pkl figures (scatter, image, subplots)
+python -c "from module.layout import app; app(['make-example-figures', '--save-folder', 'examples'])"
+
+# Render a layout from a YAML file (no GUI needed)
+python -c "from module.layout import app; app(['render', 'examples/example_layout.yaml'])"
+```
+
+Or open the interactive GUI:
+
+```bash
+python -c "from module.layout import app; app(['make-layout'])"
+```
+
+
+### YAML layout format
+
+Layouts can be defined in a human-readable YAML file. Panels are positioned using grid coordinates (`row`, `col`, `rowspan`, `colspan`) on a virtual grid overlaid on the paper:
+
+```yaml
+paper:
+  size: a4                # a4, a4_half_portrait, a0_portrait, a0_landscape, 16:9_monitor, or custom
+  width_cm: 21.0          # used when size is 'custom'
+  height_cm: 29.7
+
+grid:
+  rows: 20
+  cols: 10
+
+style:                    # optional
+  stylesheet: default     # default, modern, nature-reviews, or economist
+  font: Helvetica
+  font_size: 11.0
+  tick_font_size: 9.0
+
+panels:
+  - label: A
+    row: 1
+    col: 0
+    rowspan: 8
+    colspan: 5
+    file: path/to/scatter.pkl
+
+  - label: B
+    row: 1
+    col: 5
+    rowspan: 8
+    colspan: 5
+    file: path/to/image.png
+
+  - label: C
+    row: 11
+    col: 0
+    rowspan: 8
+    colspan: 10
+    file: path/to/subplots.pkl
+```
+
+The `file` field accepts `.pkl` (pickled matplotlib figures), `.png`, `.jpg`, or `.svg` images. Panels without a `file` are rendered as empty placeholders.
+
+See `examples/example_layout.yaml` for a complete working example.
+
+
+### GUI usage
+
+The GUI lets you visually create and edit layouts:
+
+- **Add Panel** -- adds a new labeled panel (A, B, C, ...) to the canvas
+- **Drag and resize** -- click and drag panels to move them; drag edges or corners to resize
+- **Snap to grid** -- panels snap to grid lines on release for precise alignment
+- **Right-click a panel** -- assign a `.pkl` or image file to it
+- **Save/Load Layout** -- save to YAML (grid coordinates, human-editable) or JSON (pixel coordinates); load either format back
+- **Make Figures** -- render the composed layout and save as PDF + SVG
+- **Style controls** -- choose stylesheet, font, font size, and letter casing (A/B/C vs a/b/c)
+- **Paper size** -- presets for A4, A0, 16:9 monitor, or enter custom dimensions
+
+
+### Headless rendering
+
+Render a layout file directly to PDF/SVG without opening the GUI:
+
+```bash
+python -c "from module.layout import app; app(['render', 'my_layout.yaml'])"
+
+# Specify output path and DPI
+python -c "from module.layout import app; app(['render', 'my_layout.yaml', '--output', 'figures/my_figure', '--dpi', '300'])"
+```
+
+This also works with JSON layout files saved from the GUI.
+
+
 ## Other fun stuff 
 
 I am also including other aesthetically pleasing plot styles that are non-academic. For example, to create plots from The Economist, do: 

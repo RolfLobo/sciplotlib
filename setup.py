@@ -30,7 +30,7 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=[envstring("NAME"), envstring("NAME") + ".main"],
-    install_requires=['matplotlib', 'numpy'],
+    install_requires=['matplotlib', 'numpy', 'pyyaml'],
     include_package_data=True,
     classifiers=[
         "Operating System :: POSIX :: Linux",

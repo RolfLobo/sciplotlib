@@ -29,6 +29,7 @@ import sciplotlib.style as splstyle
 
 # For saving
 import json
+import yaml
 
 import pdb
 from copy import copy
@@ -523,18 +524,59 @@ class FigureLayoutApp(ttk.Window):
             # Update the text displayed on the canvas
             self.canvas.itemconfig(panel.label_id, text=new_label)
 
+    def _bbox_to_grid_coords(self, bbox):
+        paper_x0, paper_y0, paper_x1, paper_y1 = self.canvas.coords(self.paper_rect)
+        paper_w = paper_x1 - paper_x0
+        paper_h = paper_y1 - paper_y0
+        grid_rows = self.grid_rows_var.get()
+        grid_cols = self.grid_cols_var.get()
+
+        x0, y0, x1, y1 = bbox
+        col0 = int(round((x0 - paper_x0) / paper_w * grid_cols))
+        row0 = int(round((y0 - paper_y0) / paper_h * grid_rows))
+        col1 = int(round((x1 - paper_x0) / paper_w * grid_cols))
+        row1 = int(round((y1 - paper_y0) / paper_h * grid_rows))
+
+        return row0, col0, row1 - row0, col1 - col0
+
+    def _grid_coords_to_bbox(self, row, col, rowspan, colspan):
+        paper_x0, paper_y0, paper_x1, paper_y1 = self.canvas.coords(self.paper_rect)
+        paper_w = paper_x1 - paper_x0
+        paper_h = paper_y1 - paper_y0
+        grid_rows = self.grid_rows_var.get()
+        grid_cols = self.grid_cols_var.get()
+
+        cell_w = paper_w / grid_cols
+        cell_h = paper_h / grid_rows
+
+        x0 = paper_x0 + col * cell_w
+        y0 = paper_y0 + row * cell_h
+        x1 = x0 + colspan * cell_w
+        y1 = y0 + rowspan * cell_h
+
+        return [x0, y0, x1, y1]
 
     def save_layout(self):
-        """Gathers the current layout state and saves it to a JSON file."""
+        """Gathers the current layout state and saves it to a JSON or YAML file."""
         filepath = filedialog.asksaveasfilename(
             title="Save Layout File",
-            defaultextension=".json",
-            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+            defaultextension=".yaml",
+            filetypes=[("YAML Files", "*.yaml *.yml"), ("JSON Files", "*.json"), ("All Files", "*.*")]
         )
         if not filepath:
-            return  # User cancelled
+            return
 
-        # 1. Gather all the data into a dictionary
+        suffix = Path(filepath).suffix.lower()
+        try:
+            if suffix in ('.yaml', '.yml'):
+                self._save_yaml(filepath)
+            else:
+                self._save_json(filepath)
+            print(f"Layout saved successfully to {filepath}")
+        except Exception as e:
+            print(f"Error saving layout: {e}")
+
+    def _save_json(self, filepath):
         layout_data = {
             'grid_settings': {
                 'rows': self.grid_rows_var.get(),
@@ -551,71 +593,154 @@ class FigureLayoutApp(ttk.Window):
         for panel in self.panels:
             panel_info = {
                 'label': panel.label_text,
-                'bbox': panel.get_bbox(),  # [x0, y0, x1, y1]
+                'bbox': panel.get_bbox(),
                 'filepath': getattr(panel, 'filepath', None)
             }
             layout_data['panels'].append(panel_info)
 
-        # 2. Write the data to the JSON file
-        try:
-            with open(filepath, 'w') as f:
-                json.dump(layout_data, f, indent=4)
-            print(f"Layout saved successfully to {filepath}")
-        except Exception as e:
-            print(f"Error saving layout: {e}")
+        with open(filepath, 'w') as f:
+            json.dump(layout_data, f, indent=4)
+
+    def _save_yaml(self, filepath):
+        panels_data = []
+        for panel in self.panels:
+            row, col, rowspan, colspan = self._bbox_to_grid_coords(panel.get_bbox())
+            panel_info = {
+                'label': panel.label_text,
+                'row': row,
+                'col': col,
+                'rowspan': rowspan,
+                'colspan': colspan,
+            }
+            fp = getattr(panel, 'filepath', None)
+            if fp:
+                panel_info['file'] = fp
+            panels_data.append(panel_info)
+
+        layout_data = {
+            'paper': {
+                'size': self.paper_size_var.get(),
+                'width_cm': float(self.custom_width_var.get()),
+                'height_cm': float(self.custom_height_var.get()),
+            },
+            'grid': {
+                'rows': self.grid_rows_var.get(),
+                'cols': self.grid_cols_var.get(),
+            },
+            'style': {
+                'stylesheet': self.stylesheet_var.get(),
+                'font': self.font_var.get(),
+                'font_size': float(self.font_size_var.get()),
+                'tick_font_size': float(self.tick_font_size_var.get()),
+            },
+            'panels': panels_data,
+        }
+
+        with open(filepath, 'w') as f:
+            yaml.dump(layout_data, f, default_flow_style=False, sort_keys=False)
 
     def load_layout(self):
-        """Loads a layout state from a JSON file."""
+        """Loads a layout state from a JSON or YAML file."""
         filepath = filedialog.askopenfilename(
             title="Open Layout File",
-            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+            filetypes=[("Layout Files", "*.yaml *.yml *.json"), ("YAML Files", "*.yaml *.yml"),
+                       ("JSON Files", "*.json"), ("All Files", "*.*")]
         )
         if not filepath:
-            return  # User cancelled
+            return
 
+        suffix = Path(filepath).suffix.lower()
         try:
-            with open(filepath, 'r') as f:
-                layout_data = json.load(f)
-
-            # 1. Clear the current state
-            for panel in self.panels:
-                self.canvas.delete(panel.rect)
-                self.canvas.delete(panel.label_id)
-                if panel.file_label_id:
-                    self.canvas.delete(panel.file_label_id)
-            self.panels.clear()
-
-            # 2. Apply global settings from the file
-            self.grid_rows_var.set(layout_data['grid_settings']['rows'])
-            self.grid_cols_var.set(layout_data['grid_settings']['cols'])
-            self.paper_size_var.set(layout_data['paper_settings']['size_name'])
-            self.custom_width_var.set(layout_data['paper_settings']['custom_width_cm'])
-            self.custom_height_var.set(layout_data['paper_settings']['custom_height_cm'])
-
-            # Update the canvas to reflect these settings
-            self.update_paper_size()
-
-            # 3. Recreate the panels
-            for panel_info in layout_data['panels']:
-                bbox = panel_info['bbox']
-                x0, y0, x1, y1 = bbox
-                w, h = x1 - x0, y1 - y0
-
-                panel = ResizablePanel(self.canvas, x0, y0, w, h,
-                                       label=panel_info['label'],
-                                       grid_rows=self.grid_rows,
-                                       grid_cols=self.grid_cols,
-                                       paper_bbox=self.canvas.coords(self.paper_rect))
-
-                if panel_info.get('filepath'):
-                    panel.display_file_path(panel_info['filepath'])
-
-                self.panels.append(panel)
-
+            if suffix in ('.yaml', '.yml'):
+                self._load_yaml(filepath)
+            else:
+                self._load_json(filepath)
             print(f"Layout loaded successfully from {filepath}")
-
         except Exception as e:
             print(f"Error loading layout: {e}")
+
+    def _clear_panels(self):
+        for panel in self.panels:
+            self.canvas.delete(panel.rect)
+            self.canvas.delete(panel.label_id)
+            if panel.file_label_id:
+                self.canvas.delete(panel.file_label_id)
+        self.panels.clear()
+
+    def _load_json(self, filepath):
+        with open(filepath, 'r') as f:
+            layout_data = json.load(f)
+
+        self._clear_panels()
+
+        self.grid_rows_var.set(layout_data['grid_settings']['rows'])
+        self.grid_cols_var.set(layout_data['grid_settings']['cols'])
+        self.paper_size_var.set(layout_data['paper_settings']['size_name'])
+        self.custom_width_var.set(layout_data['paper_settings']['custom_width_cm'])
+        self.custom_height_var.set(layout_data['paper_settings']['custom_height_cm'])
+        self.update_paper_size()
+
+        for panel_info in layout_data['panels']:
+            bbox = panel_info['bbox']
+            x0, y0, x1, y1 = bbox
+            w, h = x1 - x0, y1 - y0
+
+            panel = ResizablePanel(self.canvas, x0, y0, w, h,
+                                   label=panel_info['label'],
+                                   grid_rows=self.grid_rows,
+                                   grid_cols=self.grid_cols,
+                                   paper_bbox=self.canvas.coords(self.paper_rect))
+
+            if panel_info.get('filepath'):
+                panel.display_file_path(panel_info['filepath'])
+
+            self.panels.append(panel)
+
+    def _load_yaml(self, filepath):
+        with open(filepath, 'r') as f:
+            layout_data = yaml.safe_load(f)
+
+        self._clear_panels()
+
+        paper = layout_data.get('paper', {})
+        grid = layout_data.get('grid', {})
+        style = layout_data.get('style', {})
+
+        self.grid_rows_var.set(grid.get('rows', 20))
+        self.grid_cols_var.set(grid.get('cols', 10))
+        self.paper_size_var.set(paper.get('size', 'a4'))
+        self.custom_width_var.set(paper.get('width_cm', 21.0))
+        self.custom_height_var.set(paper.get('height_cm', 29.7))
+        self.update_paper_size()
+
+        if style:
+            self.stylesheet_var.set(style.get('stylesheet', 'default'))
+            self.font_var.set(style.get('font', 'Helvetica'))
+            self.font_size_var.set(style.get('font_size', 11.0))
+            self.tick_font_size_var.set(style.get('tick_font_size', 9.0))
+
+        for panel_info in layout_data.get('panels', []):
+            row = panel_info.get('row', 0)
+            col = panel_info.get('col', 0)
+            rowspan = panel_info.get('rowspan', 2)
+            colspan = panel_info.get('colspan', 2)
+
+            bbox = self._grid_coords_to_bbox(row, col, rowspan, colspan)
+            x0, y0, x1, y1 = bbox
+            w, h = x1 - x0, y1 - y0
+
+            label = panel_info.get('label', chr(ord('A') + len(self.panels)))
+            panel = ResizablePanel(self.canvas, x0, y0, w, h,
+                                   label=label,
+                                   grid_rows=self.grid_rows,
+                                   grid_cols=self.grid_cols,
+                                   paper_bbox=self.canvas.coords(self.paper_rect))
+
+            fp = panel_info.get('file')
+            if fp:
+                panel.display_file_path(fp)
+
+            self.panels.append(panel)
 
 
     def _browse_save_path(self):
@@ -708,15 +833,6 @@ class FigureLayoutApp(ttk.Window):
 
     def update_paper_size(self):
         """Resizes the paper rectangle on the canvas based on the selected size."""
-        # Dictionary of preset dimensions in cm (width, height)
-        PAPER_DIMENSIONS = {
-            'a4': (21.0, 29.7),
-            'a4_half_portrait': (10.5, 29.7),
-            'a0_portrait': (84.1, 118.9),
-            'a0_landscape': (118.9, 84.1),
-            '16:9_monitor': (59.7, 33.6),  # For a 27-inch monitor
-        }
-
         selection = self.paper_size_var.get()
 
         if selection == 'custom':
@@ -897,6 +1013,14 @@ class FigureLayoutApp(ttk.Window):
                     except Exception as e:
                         print(f"Error saving figure: {e}")
 
+PAPER_DIMENSIONS = {
+    'a4': (21.0, 29.7),
+    'a4_half_portrait': (10.5, 29.7),
+    'a0_portrait': (84.1, 118.9),
+    'a0_landscape': (118.9, 84.1),
+    '16:9_monitor': (59.7, 33.6),
+}
+
 app = typer.Typer()
 
 
@@ -981,6 +1105,174 @@ def make_example_figures(save_folder=None):
 
     # also save as png
     fig.savefig(save_path[0:-4])
+
+
+def _render_panels_to_figure(panels, grid_rows, grid_cols, fig, style_info=None):
+    """Render a list of panel dicts (with grid coords) onto a matplotlib figure."""
+    from matplotlib.gridspec import GridSpec
+
+    gs = GridSpec(grid_rows, grid_cols, figure=fig)
+
+    for p in panels:
+        r0, c0 = p['row'], p['col']
+        r1, c1 = r0 + p['rowspan'], c0 + p['colspan']
+        r0 = max(0, min(r0, grid_rows - 1))
+        c0 = max(0, min(c0, grid_cols - 1))
+        r1 = max(r0 + 1, min(r1, grid_rows))
+        c1 = max(c0 + 1, min(c1, grid_cols))
+
+        ax = fig.add_subplot(gs[r0:r1, c0:c1])
+        ax.text(-0.1, 1.05, p.get('label', ''), transform=ax.transAxes,
+                fontsize=14, fontweight='bold', va='bottom', ha='right')
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        fp = p.get('file')
+        if fp:
+            sfx = Path(fp).suffix.lower()
+            if sfx in ['.png', '.jpg', '.jpeg', '.svg']:
+                img = mpimg.imread(fp)
+                ax.imshow(img)
+                ax.axis('off')
+            elif sfx == '.pkl':
+                try:
+                    with open(fp, 'rb') as fh:
+                        original_fig = pickle.load(fh)
+                    buf = io.BytesIO()
+                    pickle.dump(original_fig, buf)
+                    buf.seek(0)
+                    fig_copy = pickle.load(buf)
+                    source_axes = fig_copy.get_axes()
+                    if len(source_axes) == 1:
+                        copy_axes_content(source_axes[0], ax)
+                    else:
+                        ax.axis('off')
+                        inner_gs = ax.get_subplotspec().subgridspec(1, len(source_axes), wspace=0.3)
+                        for i, src_ax in enumerate(source_axes):
+                            sub_ax = fig.add_subplot(inner_gs[0, i])
+                            copy_axes_content(src_ax, sub_ax)
+                except Exception as e:
+                    ax.text(0.5, 0.5, f"Failed to load:\n{Path(fp).name}",
+                            ha='center', va='center')
+        else:
+            ax.set_facecolor('#f0f0f0')
+            ax.text(0.5, 0.5, 'Empty', ha='center', va='center')
+
+
+def _parse_layout_file(filepath):
+    """Parse a YAML or JSON layout file and return a normalized dict."""
+    filepath = Path(filepath)
+    suffix = filepath.suffix.lower()
+
+    with open(filepath, 'r') as f:
+        if suffix in ('.yaml', '.yml'):
+            data = yaml.safe_load(f)
+        else:
+            data = json.load(f)
+
+    if 'grid_settings' in data:
+        grid_rows = data['grid_settings']['rows']
+        grid_cols = data['grid_settings']['cols']
+        paper_size = data['paper_settings']['size_name']
+        custom_w = data['paper_settings']['custom_width_cm']
+        custom_h = data['paper_settings']['custom_height_cm']
+        style_info = {}
+
+        # Convert pixel-based bbox to grid coords
+        if paper_size == 'custom':
+            pw, ph = custom_w, custom_h
+        else:
+            pw, ph = PAPER_DIMENSIONS.get(paper_size, (21.0, 29.7))
+        true_w = cm_to_px(pw, 96)
+        true_h = cm_to_px(ph, 96)
+        canvas_w, canvas_h = 700, 1200
+        scale = 1.0
+        if true_w > canvas_w or true_h > canvas_h:
+            scale = min(canvas_w / true_w, canvas_h / true_h)
+        disp_w = true_w * scale
+        disp_h = true_h * scale
+
+        panels = []
+        for p in data['panels']:
+            x0, y0, x1, y1 = p['bbox']
+            col0 = int(round((x0 - 50) / disp_w * grid_cols))
+            row0 = int(round((y0 - 50) / disp_h * grid_rows))
+            col1 = int(round((x1 - 50) / disp_w * grid_cols))
+            row1 = int(round((y1 - 50) / disp_h * grid_rows))
+            panels.append({
+                'label': p.get('label', ''),
+                'row': row0, 'col': col0,
+                'rowspan': row1 - row0, 'colspan': col1 - col0,
+                'file': p.get('filepath'),
+            })
+    else:
+        grid_rows = data.get('grid', {}).get('rows', 20)
+        grid_cols = data.get('grid', {}).get('cols', 10)
+        paper_size = data.get('paper', {}).get('size', 'a4')
+        custom_w = data.get('paper', {}).get('width_cm', 21.0)
+        custom_h = data.get('paper', {}).get('height_cm', 29.7)
+        style_info = data.get('style', {})
+        panels = []
+        for p in data.get('panels', []):
+            panels.append({
+                'label': p.get('label', ''),
+                'row': p.get('row', 0),
+                'col': p.get('col', 0),
+                'rowspan': p.get('rowspan', 2),
+                'colspan': p.get('colspan', 2),
+                'file': p.get('file'),
+            })
+
+    if paper_size == 'custom':
+        paper_w_cm, paper_h_cm = custom_w, custom_h
+    else:
+        paper_w_cm, paper_h_cm = PAPER_DIMENSIONS.get(paper_size, (21.0, 29.7))
+
+    return {
+        'paper_w_cm': paper_w_cm,
+        'paper_h_cm': paper_h_cm,
+        'grid_rows': grid_rows,
+        'grid_cols': grid_cols,
+        'style': style_info,
+        'panels': panels,
+    }
+
+
+@app.command()
+def render(layout_file: str, output: str = None, dpi: int = 300):
+    """Render a layout file (YAML or JSON) directly to PDF/SVG without the GUI."""
+    parsed = _parse_layout_file(layout_file)
+
+    fig_w_in = parsed['paper_w_cm'] / 2.54
+    fig_h_in = parsed['paper_h_cm'] / 2.54
+
+    if output is None:
+        output = str(Path(layout_file).with_suffix(''))
+    output = str(Path(output).with_suffix(''))
+
+    style_info = parsed['style']
+    style_name = style_info.get('stylesheet', 'default')
+    selected_font = style_info.get('font', 'Helvetica')
+    font_size = style_info.get('font_size', 11.0)
+
+    rc_params = {
+        'pdf.fonttype': 42,
+        'font.family': selected_font,
+        'font.size': font_size,
+    }
+
+    with plt.style.context(splstyle.get_style(style_name)):
+        with plt.rc_context(rc=rc_params):
+            fig = plt.figure(figsize=(fig_w_in, fig_h_in), dpi=dpi)
+            _render_panels_to_figure(parsed['panels'], parsed['grid_rows'],
+                                     parsed['grid_cols'], fig)
+            fig.tight_layout()
+
+            p = Path(output)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(p.with_suffix('.pdf'))
+            fig.savefig(p.with_suffix('.svg'), transparent=True)
+            print(f"Figure rendered to:\n  {p.with_suffix('.pdf')}\n  {p.with_suffix('.svg')}")
 
 
 class GridPanel:
