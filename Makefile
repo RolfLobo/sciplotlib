@@ -43,7 +43,23 @@ export HOST_UID
 
 
 
-.PHONY: shell 
+# ── uv targets ────────────────────────────────────────────────────────────────
+
+.PHONY: sync
+sync:
+	uv sync --extra dev
+
+.PHONY: notebook
+notebook:
+	uv run marimo edit notebooks/preview_test.py
+
+.PHONY: notebook-sandbox
+notebook-sandbox:
+	marimo edit --sandbox notebooks/preview_test.py
+
+# ── legacy Docker targets ──────────────────────────────────────────────────────
+
+.PHONY: shell
 shell:
 	$(RUN_DOCK) "cd $(MODULE_NAME) \
 		&& ([ -d "$(MODULE_NAME)" ] || ln -sf module "$(MODULE_NAME)") \

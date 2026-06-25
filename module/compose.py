@@ -777,7 +777,8 @@ class FigureComposer:
         if self.rc_params:
             plt.rcParams.update(self.rc_params)
 
-    def add_panel(self, label, row, col, rowspan, colspan, file=None, no_axis=False, axes_pad=None):
+    def add_panel(self, label, row, col, rowspan, colspan, file=None,
+                  no_axis=False, axes_pad=None, plot_func=None):
         """Add a panel to the layout.
 
         Parameters
@@ -786,6 +787,19 @@ class FigureComposer:
             Per-panel override for axes inset padding. Set to ``{}``
             to disable the global axes_pad for this panel. ``None``
             (default) inherits the composer's global axes_pad.
+        plot_func : callable, optional
+            A function with signature ``plot_func(ax)`` that draws content
+            onto the panel axes.  Called during :meth:`compose` after the
+            axes is created.  Takes priority over *file* if both are given.
+
+            Example::
+
+                def draw_panel_a(ax):
+                    ax.scatter(x, y, color='steelblue')
+                    ax.set_xlabel('Time (s)')
+
+                composer.add_panel('A', row=0, col=0, rowspan=4, colspan=5,
+                                   plot_func=draw_panel_a)
 
         Returns self for method chaining.
         """
@@ -798,6 +812,7 @@ class FigureComposer:
             'file': str(file) if file else None,
             'no_axis': no_axis,
             'axes_pad': axes_pad,
+            'plot_func': plot_func,
         })
         return self
 
@@ -857,7 +872,9 @@ class FigureComposer:
             fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
         return fig, ax
 
-    def preview_image(self, label, wspace=None, hspace=None, plot_func=None, width=None, pad_inches=(2.0, 1.0), **kwargs):
+    def preview_image(self, label, wspace=None, hspace=None, plot_func=None,
+                      normalize=False, show_label=True,
+                      width=None, pad_inches=(2.0, 1.0), **kwargs):
         """Create a preview of a panel and return it as a marimo-compatible HTML image.
 
         This avoids aspect-ratio squishing in the marimo UI by rendering the panel
@@ -872,15 +889,31 @@ class FigureComposer:
         plot_func : callable, optional
             A function that takes an Axes object and plots the panel content.
             If provided, it will be executed on the preview axes before rendering.
+            When *normalize* is True this falls back to the ``plot_func``
+            registered via :meth:`add_panel` if not supplied here.
+        normalize : bool, optional
+            If True, compose the full figure (drawing only this panel), run the
+            same normalisation passes as :meth:`to_image` and :meth:`save`
+            (``normalize_fonts``, ``fit_axes_to_cells``, ``normalize_spines``),
+            then crop to only the target panel's content.  The result matches
+            the final PDF exactly.  Defaults to False.
+        show_label : bool, optional
+            When *normalize* is True, whether to show the panel letter label
+            (e.g. "A", "B") in the preview.  Defaults to True.  Has no effect
+            when *normalize* is False (standalone preview figures have no label).
         width : int or str, optional
             The display width of the image. Defaults to the calculated physical size
             in CSS pixels (96 pixels per inch).
         pad_inches : tuple of float, optional
-            Width and height padding in inches to add around the axes to prevent clipping
-            of overflowing content. Defaults to (2.0, 1.0).
+            Width and height padding in inches to add around the axes to prevent
+            clipping of overflowing content (ignored when *normalize* is True).
+            Defaults to (2.0, 1.0).
         **kwargs
             Passed to marimo.image.
         """
+        if normalize:
+            return self._normalized_preview_image(
+                label, plot_func=plot_func, show_label=show_label, width=width, **kwargs)
         fig, ax = self.preview(label, wspace=wspace, hspace=hspace, pad_inches=pad_inches)
         if plot_func is not None:
             plot_func(ax)
@@ -888,6 +921,75 @@ class FigureComposer:
             size = self.panel_figsize(label, wspace=wspace, hspace=hspace)
             width = int(size[0] * 96)
         return figure_to_image(fig, width=width, dpi=self.dpi, **kwargs)
+
+    def _normalized_preview_image(self, label, plot_func=None, show_label=True,
+                                   width=None, **kwargs):
+        """Compose the full figure, normalize, and crop to the target panel's content.
+
+        This is the engine behind ``preview_image(..., normalize=True)``.
+        Only the target panel is drawn; all other panels are left empty so
+        that normalization is computed in the same GridSpec context as the
+        final figure, giving an exact match with the PDF output.
+        """
+        p_def = next((p for p in self.panels if p['label'] == label), None)
+        if p_def is None:
+            raise ValueError(f"Panel '{label}' not found.")
+
+        _plot_func = plot_func if plot_func is not None else p_def.get('plot_func')
+
+        # Snapshot all plot_funcs, then suppress every panel except the target
+        # so compose() only draws this one panel in its correct GridSpec slot.
+        snapshot = {p['label']: p.get('plot_func') for p in self.panels}
+        for p in self.panels:
+            if p['label'] != label:
+                p.pop('plot_func', None)
+            elif _plot_func is not None:
+                p['plot_func'] = _plot_func
+
+        try:
+            fig, axes = self.compose()
+            self.normalize_fonts()
+            self.fit_axes_to_cells()
+            self.normalize_spines()
+
+            # Hide every non-target axes so bbox_inches='tight' crops to just
+            # this panel's content (colorbars, titles, tick labels included).
+            for p in self.panels:
+                lbl = p.get('label', '')
+                if lbl and lbl != label and lbl in axes:
+                    axes[lbl].set_visible(False)
+
+            # Panel letters are figure-level text objects.  Hide the ones that
+            # belong to other panels; optionally hide the target panel's own letter.
+            all_labels = {p.get('label', '') for p in self.panels if p.get('label')}
+            for text_obj in fig.texts:
+                txt = text_obj.get_text()
+                if txt in all_labels:
+                    if txt != label:
+                        text_obj.set_visible(False)
+                    elif not show_label:
+                        text_obj.set_visible(False)
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight')
+            buf.seek(0)
+            data = buf.read()
+        finally:
+            plt.close(self._fig) if self._fig is not None else None
+            self._fig = None
+            for p in self.panels:
+                saved = snapshot.get(p['label'])
+                if saved is not None:
+                    p['plot_func'] = saved
+                else:
+                    p.pop('plot_func', None)
+
+        if width is None:
+            size = self.panel_figsize(label)
+            width = int(size[0] * 96)
+
+        import marimo as mo
+        return mo.image(data, width=width, **kwargs)
 
     def compose(self, wspace=None, hspace=None, clip_panels=True):
         """Create the composed figure with all panels on a grid.
@@ -923,6 +1025,13 @@ class FigureComposer:
             margins=self.margins,
             axes_pad=self.axes_pad,
         )
+
+        # Call plot_func for panels that provide one
+        for p in self.panels:
+            label = p.get('label', '')
+            plot_func = p.get('plot_func')
+            if plot_func is not None and label in axes:
+                plot_func(axes[label])
 
         # For panels with no_axis=True, turn off axes after render
         for p in self.panels:
@@ -1058,6 +1167,35 @@ class FigureComposer:
 
         for ax in self._fig.get_axes():
             _apply(ax)
+
+    @staticmethod
+    def _fit_single_ax(fig, ax, cell_bounds, n_iterations=3):
+        """Apply the fit_axes_to_cells logic to a single axes.
+
+        ``cell_bounds`` is a 4-tuple (x0, y0, x1, y1) in figure-fraction
+        coordinates defining the boundary the axes must stay within.
+        """
+        from matplotlib.transforms import Bbox
+        cell = Bbox([[cell_bounds[0], cell_bounds[1]],
+                     [cell_bounds[2], cell_bounds[3]]])
+        inv_fig = fig.transFigure.inverted()
+        for _ in range(n_iterations):
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            tight = ax.get_tightbbox(renderer)
+            if tight is None:
+                break
+            tb = tight.transformed(inv_fig)
+            pos = ax.get_position()
+            dl = max(0.0, cell.x0 - tb.x0)
+            db = max(0.0, cell.y0 - tb.y0)
+            dr = max(0.0, tb.x1 - cell.x1)
+            if dl + db + dr < 1e-6:
+                break
+            ax.set_position([
+                pos.x0 + dl, pos.y0 + db,
+                pos.width - dl - dr, pos.height - db,
+            ])
 
     def fit_axes_to_cells(self, n_iterations=3, constrain_top=False):
         """Shrink each axes so its decorations fit within the gridspec cell.

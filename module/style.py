@@ -150,3 +150,106 @@ def get_palette(name='nature-reviews', output_type='hex'):
         colors = [struct.unpack('BBB', color[1:].decode('hex')) for color in colors]
 
     return colors
+
+
+def style_axes(ax, style='nature-reviews', font_size=None,
+               axis_label_font_size=None, tick_font_size=None,
+               title_font_size=None, spine_linewidth=None,
+               tick_linewidth=None, tick_length=None):
+    """Apply a named sciplotlib stylesheet to an existing axes in-place.
+
+    Useful for making exploratory plots paper-ready without rebuilding them
+    from scratch.  Applies spine visibility, linewidths, tick parameters,
+    font sizes, facecolor, and color cycle from the named stylesheet.
+    Override any individual parameter to fine-tune after applying the base
+    style.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        The axes to style.
+    style : str
+        Name of a sciplotlib stylesheet (e.g. 'nature-reviews', 'nature',
+        'modern', 'economist', 'mp-paper').
+    font_size : float, optional
+        Base font size for tick labels and free text. Defaults to the
+        stylesheet's ``font.size``.
+    axis_label_font_size : float, optional
+        Font size for x/y axis labels. Defaults to the stylesheet's
+        ``axes.labelsize``.
+    tick_font_size : float, optional
+        Font size for tick labels. Defaults to ``font_size`` if given,
+        otherwise the stylesheet's ``xtick.labelsize``.
+    title_font_size : float, optional
+        Font size for the axes title. Defaults to the stylesheet's
+        ``axes.titlesize``.
+    spine_linewidth : float, optional
+        Linewidth for all four spines. Defaults to ``axes.linewidth``.
+    tick_linewidth : float, optional
+        Linewidth for tick marks. Defaults to ``spine_linewidth``.
+    tick_length : float, optional
+        Length of major tick marks in points. Defaults to
+        ``xtick.major.size`` from the stylesheet.
+
+    Returns
+    -------
+    ax : matplotlib.axes.Axes
+        The same axes object, modified in-place.
+
+    Examples
+    --------
+    Apply nature-reviews style to an axes you already have:
+
+    >>> fig, ax = plt.subplots()
+    >>> ax.scatter(x, y)
+    >>> from sciplotlib import style as spstyle
+    >>> spstyle.style_axes(ax, 'nature-reviews', font_size=9)
+    """
+    import matplotlib as mpl
+
+    style_path = get_style(style)
+    with mpl.rc_context():
+        mpl.style.use(style_path)
+        rc = dict(mpl.rcParams)
+
+    # --- Spine visibility ---
+    for name in ('top', 'right', 'left', 'bottom'):
+        ax.spines[name].set_visible(rc.get(f'axes.spines.{name}', True))
+
+    # --- Spine linewidth ---
+    lw = spine_linewidth if spine_linewidth is not None else rc.get('axes.linewidth', 0.8)
+    for spine in ax.spines.values():
+        spine.set_linewidth(lw)
+
+    # --- Background ---
+    ax.set_facecolor(rc.get('axes.facecolor', 'white'))
+
+    # --- Font sizes ---
+    base_font = font_size if font_size is not None else rc.get('font.size', 10)
+    label_sz = axis_label_font_size if axis_label_font_size is not None else rc.get('axes.labelsize', base_font)
+    tick_sz = tick_font_size if tick_font_size is not None else rc.get('xtick.labelsize', base_font)
+    title_sz = title_font_size if title_font_size is not None else rc.get('axes.titlesize', base_font)
+
+    ax.xaxis.label.set_fontsize(label_sz)
+    ax.yaxis.label.set_fontsize(label_sz)
+    ax.title.set_fontsize(title_sz)
+
+    # --- Tick parameters ---
+    tick_lw = tick_linewidth if tick_linewidth is not None else lw
+    tick_len = tick_length if tick_length is not None else rc.get('xtick.major.size', 3.5)
+    tick_dir = rc.get('xtick.direction', 'out')
+
+    ax.tick_params(
+        axis='both', which='major',
+        labelsize=tick_sz,
+        width=tick_lw,
+        length=tick_len,
+        direction=tick_dir,
+    )
+
+    # --- Color cycle ---
+    prop_cycle = rc.get('axes.prop_cycle')
+    if prop_cycle is not None:
+        ax.set_prop_cycle(prop_cycle)
+
+    return ax
