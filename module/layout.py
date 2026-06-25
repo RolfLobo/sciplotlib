@@ -3,7 +3,6 @@ from rich.progress import track
 import typer
 import ttkbootstrap as ttk
 from ttkbootstrap import Style
-# import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog
 import sys
@@ -18,21 +17,18 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.cbook as cbook
 import matplotlib.image as mpimg
-from matplotlib.lines import Line2D
-from matplotlib.collections import PathCollection
-from matplotlib.patches import Patch, Rectangle
-from matplotlib.image import AxesImage
-from matplotlib.text import Text
 
 # Sciplotlib
 import sciplotlib.style as splstyle
+from sciplotlib.compose import (
+    cm_to_px, PAPER_DIMENSIONS,
+    copy_axes_content, load_panel_content,
+    parse_layout_file, render_panels_to_figure,
+)
 
 # For saving
 import json
 import yaml
-
-import pdb
-from copy import copy
 
 class ResizablePanel:
     def __init__(self, canvas, x, y, w, h, label="A",
@@ -287,9 +283,6 @@ class ResizablePanel:
             cx, cy, text=filepath, anchor="center", font=("Helvetica", 9), width=x1 - x0 - 20
         )
 
-
-def cm_to_px(cm, dpi=96):
-    return int(cm * dpi / 2.54)
 
 class FigureLayoutApp(ttk.Window):
     def __init__(self, PAPER_WIDTH_CM, PAPER_HEIGHT_CM, dpi):
@@ -954,36 +947,7 @@ class FigureLayoutApp(ttk.Window):
 
                     filepath = getattr(panel, "filepath", None)
                     if filepath:
-                        suffix = Path(filepath).suffix.lower()
-                        if suffix in [".png", ".jpg", ".jpeg", ".svg"]:
-                            img = mpimg.imread(filepath)
-                            subfig_ax.imshow(img)
-                            subfig_ax.axis("off")
-                        elif suffix == ".pkl":
-                            try:
-                                with open(filepath, "rb") as f:
-                                    original_fig = pickle.load(f)
-
-                                buf = io.BytesIO()
-                                pickle.dump(original_fig, buf)
-                                buf.seek(0)
-                                fig_copy = pickle.load(buf)
-
-                                source_axes = fig_copy.get_axes()
-                                if len(source_axes) == 1:
-                                    copy_axes_content(source_axes[0], subfig_ax)
-                                else:
-                                    subrows = 1
-                                    subcols = len(source_axes)
-                                    subfig_ax.axis('off')
-                                    inner_gs = subfig_ax.get_subplotspec().subgridspec(subrows, subcols, wspace=0.3)
-
-                                    for i, src_ax in enumerate(source_axes):
-                                        sub_ax = fig.add_subplot(inner_gs[0, i])
-                                        copy_axes_content(src_ax, sub_ax)
-
-                            except Exception as e:
-                                subfig_ax.text(0.5, 0.5, f"Failed to load:\n{Path(filepath).name}", ha="center", va="center")
+                        load_panel_content(subfig_ax, filepath, fig)
                     else:
                         subfig_ax.set_facecolor("#f0f0f0")
                         subfig_ax.text(0.5, 0.5, "Empty", ha="center", va="center")
@@ -1012,14 +976,6 @@ class FigureLayoutApp(ttk.Window):
 
                     except Exception as e:
                         print(f"Error saving figure: {e}")
-
-PAPER_DIMENSIONS = {
-    'a4': (21.0, 29.7),
-    'a4_half_portrait': (10.5, 29.7),
-    'a0_portrait': (84.1, 118.9),
-    'a0_landscape': (118.9, 84.1),
-    '16:9_monitor': (59.7, 33.6),
-}
 
 app = typer.Typer()
 
@@ -1107,141 +1063,10 @@ def make_example_figures(save_folder=None):
     fig.savefig(save_path[0:-4])
 
 
-def _render_panels_to_figure(panels, grid_rows, grid_cols, fig, style_info=None):
-    """Render a list of panel dicts (with grid coords) onto a matplotlib figure."""
-    from matplotlib.gridspec import GridSpec
-
-    gs = GridSpec(grid_rows, grid_cols, figure=fig)
-
-    for p in panels:
-        r0, c0 = p['row'], p['col']
-        r1, c1 = r0 + p['rowspan'], c0 + p['colspan']
-        r0 = max(0, min(r0, grid_rows - 1))
-        c0 = max(0, min(c0, grid_cols - 1))
-        r1 = max(r0 + 1, min(r1, grid_rows))
-        c1 = max(c0 + 1, min(c1, grid_cols))
-
-        ax = fig.add_subplot(gs[r0:r1, c0:c1])
-        ax.text(-0.1, 1.05, p.get('label', ''), transform=ax.transAxes,
-                fontsize=14, fontweight='bold', va='bottom', ha='right')
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-        fp = p.get('file')
-        if fp:
-            sfx = Path(fp).suffix.lower()
-            if sfx in ['.png', '.jpg', '.jpeg', '.svg']:
-                img = mpimg.imread(fp)
-                ax.imshow(img)
-                ax.axis('off')
-            elif sfx == '.pkl':
-                try:
-                    with open(fp, 'rb') as fh:
-                        original_fig = pickle.load(fh)
-                    buf = io.BytesIO()
-                    pickle.dump(original_fig, buf)
-                    buf.seek(0)
-                    fig_copy = pickle.load(buf)
-                    source_axes = fig_copy.get_axes()
-                    if len(source_axes) == 1:
-                        copy_axes_content(source_axes[0], ax)
-                    else:
-                        ax.axis('off')
-                        inner_gs = ax.get_subplotspec().subgridspec(1, len(source_axes), wspace=0.3)
-                        for i, src_ax in enumerate(source_axes):
-                            sub_ax = fig.add_subplot(inner_gs[0, i])
-                            copy_axes_content(src_ax, sub_ax)
-                except Exception as e:
-                    ax.text(0.5, 0.5, f"Failed to load:\n{Path(fp).name}",
-                            ha='center', va='center')
-        else:
-            ax.set_facecolor('#f0f0f0')
-            ax.text(0.5, 0.5, 'Empty', ha='center', va='center')
-
-
-def _parse_layout_file(filepath):
-    """Parse a YAML or JSON layout file and return a normalized dict."""
-    filepath = Path(filepath)
-    suffix = filepath.suffix.lower()
-
-    with open(filepath, 'r') as f:
-        if suffix in ('.yaml', '.yml'):
-            data = yaml.safe_load(f)
-        else:
-            data = json.load(f)
-
-    if 'grid_settings' in data:
-        grid_rows = data['grid_settings']['rows']
-        grid_cols = data['grid_settings']['cols']
-        paper_size = data['paper_settings']['size_name']
-        custom_w = data['paper_settings']['custom_width_cm']
-        custom_h = data['paper_settings']['custom_height_cm']
-        style_info = {}
-
-        # Convert pixel-based bbox to grid coords
-        if paper_size == 'custom':
-            pw, ph = custom_w, custom_h
-        else:
-            pw, ph = PAPER_DIMENSIONS.get(paper_size, (21.0, 29.7))
-        true_w = cm_to_px(pw, 96)
-        true_h = cm_to_px(ph, 96)
-        canvas_w, canvas_h = 700, 1200
-        scale = 1.0
-        if true_w > canvas_w or true_h > canvas_h:
-            scale = min(canvas_w / true_w, canvas_h / true_h)
-        disp_w = true_w * scale
-        disp_h = true_h * scale
-
-        panels = []
-        for p in data['panels']:
-            x0, y0, x1, y1 = p['bbox']
-            col0 = int(round((x0 - 50) / disp_w * grid_cols))
-            row0 = int(round((y0 - 50) / disp_h * grid_rows))
-            col1 = int(round((x1 - 50) / disp_w * grid_cols))
-            row1 = int(round((y1 - 50) / disp_h * grid_rows))
-            panels.append({
-                'label': p.get('label', ''),
-                'row': row0, 'col': col0,
-                'rowspan': row1 - row0, 'colspan': col1 - col0,
-                'file': p.get('filepath'),
-            })
-    else:
-        grid_rows = data.get('grid', {}).get('rows', 20)
-        grid_cols = data.get('grid', {}).get('cols', 10)
-        paper_size = data.get('paper', {}).get('size', 'a4')
-        custom_w = data.get('paper', {}).get('width_cm', 21.0)
-        custom_h = data.get('paper', {}).get('height_cm', 29.7)
-        style_info = data.get('style', {})
-        panels = []
-        for p in data.get('panels', []):
-            panels.append({
-                'label': p.get('label', ''),
-                'row': p.get('row', 0),
-                'col': p.get('col', 0),
-                'rowspan': p.get('rowspan', 2),
-                'colspan': p.get('colspan', 2),
-                'file': p.get('file'),
-            })
-
-    if paper_size == 'custom':
-        paper_w_cm, paper_h_cm = custom_w, custom_h
-    else:
-        paper_w_cm, paper_h_cm = PAPER_DIMENSIONS.get(paper_size, (21.0, 29.7))
-
-    return {
-        'paper_w_cm': paper_w_cm,
-        'paper_h_cm': paper_h_cm,
-        'grid_rows': grid_rows,
-        'grid_cols': grid_cols,
-        'style': style_info,
-        'panels': panels,
-    }
-
-
 @app.command()
 def render(layout_file: str, output: str = None, dpi: int = 300):
     """Render a layout file (YAML or JSON) directly to PDF/SVG without the GUI."""
-    parsed = _parse_layout_file(layout_file)
+    parsed = parse_layout_file(layout_file)
 
     fig_w_in = parsed['paper_w_cm'] / 2.54
     fig_h_in = parsed['paper_h_cm'] / 2.54
@@ -1264,7 +1089,7 @@ def render(layout_file: str, output: str = None, dpi: int = 300):
     with plt.style.context(splstyle.get_style(style_name)):
         with plt.rc_context(rc=rc_params):
             fig = plt.figure(figsize=(fig_w_in, fig_h_in), dpi=dpi)
-            _render_panels_to_figure(parsed['panels'], parsed['grid_rows'],
+            render_panels_to_figure(parsed['panels'], parsed['grid_rows'],
                                      parsed['grid_cols'], fig)
             fig.tight_layout()
 
@@ -1366,120 +1191,6 @@ class GridPanel:
         self.canvas.tag_bind(self.label_id, "<B1-Motion>", self.on_drag)
         self.canvas.tag_bind(self.label_id, "<ButtonRelease-1>", self.on_release)
 
-
-def copy_axes_content(src_ax, dest_ax):
-    """
-       Copies data artists (lines, patches, etc.) and properties from a source
-       matplotlib axes to a destination axes. This version creates new artist
-       instances to avoid reuse errors.
-       """
-    # --- 1. COPY DATA ARTISTS BY RECREATING THEM ---
-
-    # Lines (e.g., from plot)
-    for line in src_ax.lines:
-        new_line = Line2D(
-            xdata=line.get_xdata(),
-            ydata=line.get_ydata(),
-            color=line.get_color(),
-            linestyle=line.get_linestyle(),
-            linewidth=line.get_linewidth(),
-            marker=line.get_marker(),
-            markersize=line.get_markersize(),
-            label=line.get_label()
-        )
-        dest_ax.add_line(new_line)
-
-    # Collections (e.g., from scatter)
-    for collection in src_ax.collections:
-        if isinstance(collection, PathCollection):
-            # Deconstruct the original collection to get its core properties
-            offsets = collection.get_offsets()
-
-            # This is the key change: use the high-level scatter function
-            # which is much more reliable than recreating the artist manually.
-            dest_ax.scatter(
-                offsets[:, 0],  # x-data
-                offsets[:, 1],  # y-data
-                s=collection.get_sizes(),
-                c=collection.get_facecolors(),
-                marker=collection.get_paths()[0] if collection.get_paths() else 'o',
-                alpha=collection.get_alpha(),
-                linewidths=collection.get_linewidths(),
-                edgecolors=collection.get_edgecolors(),
-                label=collection.get_label()
-            )
-            # If the original used a colormap, re-apply it
-            if collection.get_array() is not None:
-                new_collection = dest_ax.collections[-1]  # Get the collection we just made
-                new_collection.set_array(collection.get_array())
-                new_collection.set_cmap(collection.get_cmap())
-                new_collection.set_norm(collection.get_norm())
-
-    # Patches (e.g., from bar, hist)
-    for patch in src_ax.patches:
-        # Recreate the patch from its properties to break the link to the old figure
-        if isinstance(patch, Rectangle):
-            new_patch = Rectangle(
-                xy=patch.get_xy(),
-                width=patch.get_width(),
-                height=patch.get_height(),
-                angle=patch.get_angle(),
-                facecolor=patch.get_facecolor(),
-                edgecolor=patch.get_edgecolor(),
-                linewidth=patch.get_linewidth(),
-                linestyle=patch.get_linestyle(),
-                alpha=patch.get_alpha(),
-                label=patch.get_label(),
-            )
-            dest_ax.add_patch(new_patch)
-        else:
-            # Fallback for other patch types if necessary
-            new_patch = copy(patch)
-            dest_ax.add_patch(new_patch)
-
-    # Images (e.g., from imshow)
-    for image in src_ax.images:
-
-        new_image = dest_ax.imshow(
-            image.get_array(),
-            extent=image.get_extent(),
-            cmap=image.get_cmap(),
-            norm=image.norm,
-            origin=getattr(image, '_origin', 'upper'),
-            interpolation=image.get_interpolation()
-        )
-        new_image.set_clim(image.get_clim())
-
-    # Text (excluding axis labels and title)
-    for text in src_ax.texts:
-        dest_ax.text(
-            x=text.get_position()[0],
-            y=text.get_position()[1],
-            s=text.get_text(),
-            transform=dest_ax.transData,  # Ensure text is in data coordinates
-            ha=text.get_ha(),
-            va=text.get_va(),
-            fontsize=text.get_fontsize(),
-            color=text.get_color()
-        )
-
-    # Axis limits and labels
-    dest_ax.set_xlim(src_ax.get_xlim())
-    dest_ax.set_ylim(src_ax.get_ylim())
-    dest_ax.set_xscale(src_ax.get_xscale())
-    dest_ax.set_yscale(src_ax.get_yscale())
-    dest_ax.set_aspect(src_ax.get_aspect(), adjustable=src_ax.get_adjustable(), anchor=src_ax.get_anchor())
-
-    dest_ax.set_title(src_ax.get_title())
-    dest_ax.set_xlabel(src_ax.get_xlabel())
-    dest_ax.set_ylabel(src_ax.get_ylabel())
-
-    # Copy ticks, tick labels, and grid status
-    dest_ax.set_xticks(src_ax.get_xticks())
-    dest_ax.set_xticklabels([label.get_text() for label in src_ax.get_xticklabels()])
-    dest_ax.set_yticks(src_ax.get_yticks())
-    dest_ax.set_yticklabels([label.get_text() for label in src_ax.get_yticklabels()])
-    dest_ax.grid(src_ax.get_xgridlines()[0].get_visible() if src_ax.get_xgridlines() else False)
 
 @app.command()
 def main():

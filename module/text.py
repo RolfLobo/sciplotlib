@@ -73,18 +73,151 @@ def get_axes_object_max(ax, x_loc=1, object_type='line', verbose=False):
     return np.max(y_data_store)
 
 
+def pval_to_stars(p, thresholds=((1e-4, '****'), (1e-3, '***'),
+                                   (1e-2, '**'), (5e-2, '*')),
+                  ns='n.s.'):
+    """Convert a p-value to a significance string."""
+    for thresh, star in thresholds:
+        if p < thresh:
+            return star
+    return ns
+
+
+def _span_data_top(ax, lo, hi, tol):
+    """Highest y of plotted data whose x falls within [lo-tol, hi+tol]."""
+    ys = []
+    for line in ax.lines:
+        xd = np.asarray(line.get_xdata(), dtype=float)
+        yd = np.asarray(line.get_ydata(), dtype=float)
+        if xd.size != yd.size or xd.size == 0:
+            continue
+        m = (xd >= lo - tol) & (xd <= hi + tol)
+        if m.any():
+            ys.append(yd[m])
+    for coll in ax.collections:
+        offs = np.asarray(coll.get_offsets(), dtype=float)
+        if offs.ndim == 2 and offs.size:
+            m = (offs[:, 0] >= lo - tol) & (offs[:, 0] <= hi + tol)
+            if m.any():
+                ys.append(offs[m, 1])
+    if not ys:
+        return None
+    allys = np.concatenate(ys)
+    allys = allys[np.isfinite(allys)]
+    return np.nanmax(allys) if allys.size else None
+
+
+def add_significance_bars(ax, pairs, pvalues=None, labels=None,
+                          pad=None, tick_height=None, text_pt_offset=1.0,
+                          color='black', linewidth=1.0, fontsize=10,
+                          show_ns=True, ns_label='n.s.',
+                          star_thresholds=((1e-4, '****'), (1e-3, '***'),
+                                           (1e-2, '**'), (5e-2, '*')),
+                          expand_ylim=True):
+    """Draw significance bracket(s) between pairs of x-positions.
+
+    Each bracket sits above the tallest data point within its x-span.
+    Overlapping brackets are stacked automatically (narrow spans first).
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    pairs : list of (x1, x2)
+        X-positions in data coordinates.
+    pvalues : list of float, optional
+        One p-value per pair, converted to stars via *star_thresholds*.
+    labels : list of str, optional
+        Explicit text per pair (overrides pvalues).
+    pad : float, optional
+        Vertical gap above data (data units). Default ~6% of y-range.
+    tick_height : float, optional
+        Length of bracket end-ticks. Default ~30% of pad.
+    text_pt_offset : float
+        Gap in points between bracket line and label text.
+    color, linewidth, fontsize : styling
+    show_ns : bool
+        If False, skip non-significant pairs.
+    ns_label : str
+        Text used for non-significant results.
+    star_thresholds : tuple of (threshold, label)
+        P-value thresholds for star labels.
+    expand_ylim : bool
+        If True, expand ylim to fit brackets.
+
+    Returns
+    -------
+    top_line : float
+        Y-position of the highest bracket drawn.
+    """
+    y0, y1 = ax.get_ylim()
+    yrange = (y1 - y0) or 1.0
+    x0, x1 = ax.get_xlim()
+    tol = 0.01 * (abs(x1 - x0) or 1.0)
+
+    if pad is None:
+        pad = 0.06 * yrange
+    if tick_height is None:
+        tick_height = 0.3 * pad
+
+    label_list, keep = [], []
+    for i, _ in enumerate(pairs):
+        if labels is not None:
+            txt = labels[i]
+        elif pvalues is not None:
+            txt = pval_to_stars(pvalues[i], star_thresholds, ns_label)
+        else:
+            txt = ''
+        keep.append(not (txt == ns_label and not show_ns))
+        label_list.append(txt)
+
+    pairs_k = [(min(p), max(p)) for p, k in zip(pairs, keep) if k]
+    labels_k = [t for t, k in zip(label_list, keep) if k]
+
+    order = sorted(range(len(pairs_k)), key=lambda i: pairs_k[i][1] - pairs_k[i][0])
+    line_y = [None] * len(pairs_k)
+    placed = []
+
+    for i in order:
+        lo, hi = pairs_k[i]
+        top = _span_data_top(ax, lo, hi, tol)
+        if top is None:
+            top = y0
+        base = top + pad
+
+        for (plo, phi, py) in placed:
+            strict_overlap = (lo < phi) and (plo < hi)
+            touch = (abs(lo - phi) <= tol) or (abs(hi - plo) <= tol)
+            if strict_overlap:
+                base = max(base, py + 2 * pad)
+            elif touch and abs(base - py) < 0.6 * pad:
+                base = max(base, py + pad)
+
+        placed.append((lo, hi, base))
+        line_y[i] = base
+
+    top_line = y0
+    for (lo, hi), y, txt in zip(pairs_k, line_y, labels_k):
+        ax.plot([lo, lo, hi, hi],
+                [y - tick_height, y, y, y - tick_height],
+                color=color, lw=linewidth, clip_on=False, zorder=10)
+        is_star = bool(txt) and set(txt) <= {'*'}
+        ax.annotate(txt, xy=((lo + hi) / 2.0, y),
+                    xytext=(0, text_pt_offset), textcoords='offset points',
+                    ha='center', va='center_baseline' if is_star else 'bottom',
+                    color=color, fontsize=fontsize, clip_on=False, zorder=10)
+        top_line = max(top_line, y)
+
+    if expand_ylim and (top_line + 2 * pad) > y1:
+        ax.set_ylim(y0, top_line + 2 * pad)
+
+    return top_line
+
+
 def add_stat_annot(fig, ax, x_start_list, x_end_list,
                    y_start_list=None, y_end_list=None,
                    line_height=2, stat_list=['*'],
                    text_y_offset=0.2, text_x_offset=-0.01):
-    """
-    Add annotation indicating statistical significance (mainly to be used in boxplots, but can be generalised
-    to any boxplot-like figurse, such as stripplots)
-
-    Parameters
-    -----------
-    
-    """
+    """Legacy interface — use :func:`add_significance_bars` instead."""
 
     if type(x_start_list) is not list:
         x_start_list = [x_start_list]
@@ -96,14 +229,13 @@ def add_stat_annot(fig, ax, x_start_list, x_end_list,
             y_start = get_axes_object_max(ax, x_loc=x_start, object_type='line') + line_height
         if y_end is None:
             max_at_x_end = get_axes_object_max(ax, x_loc=x_end, object_type='line')
-            print(max_at_x_end)
             y_end = max_at_x_end + line_height
 
         y_start_end_max = np.max([y_start, y_end])
 
-        sig_line = ax.plot([x_start, x_start, x_end, x_end],
-                           [y_start, y_start_end_max + line_height, y_start_end_max + line_height, y_end],
-                           linewidth=1, color='k')
+        ax.plot([x_start, x_start, x_end, x_end],
+                [y_start, y_start_end_max + line_height, y_start_end_max + line_height, y_end],
+                linewidth=1, color='k')
 
         ax.text(x=(x_start + x_end) / 2 + text_x_offset,
                 y=y_start_end_max + line_height + text_y_offset,
