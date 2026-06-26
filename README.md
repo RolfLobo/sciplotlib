@@ -209,6 +209,111 @@ python -c "from module.layout import app; app(['render', 'my_layout.yaml', '--ou
 This also works with JSON layout files saved from the GUI.
 
 
+## Using FigureComposer with marimo
+
+[marimo](https://marimo.io) is a reactive Python notebook where cells re-run automatically when their inputs change. `FigureComposer` pairs naturally with this model: each panel lives in its own cell, so editing one panel only re-runs that cell and the final compose cell — not the whole notebook.
+
+### Recommended cell structure
+
+```
+imports cell          →  mo, plt, np, splcompose, …
+composer cell         →  FigureComposer + add_panel calls
+data loaders cell     →  @lru_cache loading functions  ← no inputs from other cells
+data cell (monkey)    →  calls loader, defines plot functions
+data cell (mouse)     →  calls loader, defines plot functions
+panel a cell          →  defines plot_panel_a, previews it
+panel b cell          →  defines plot_panel_b, previews it
+…
+compose cell          →  composer.compose() + all plot_panel_* calls
+save cell             →  composer.save(…)
+```
+
+**The key rule**: keep heavy I/O (file reads, feature engineering) in a dedicated *data loaders* cell whose marimo function signature is `def _():` — no inputs from other cells. marimo will never auto-re-run this cell unless its own code changes.
+
+### Caching data loading with `@functools.lru_cache`
+
+Wrap each expensive operation in a `@lru_cache` function with no arguments, and import all dependencies *inside* the function so the cell has no external inputs:
+
+```python
+# data loaders cell  —  def _():  (no inputs)
+import functools
+
+@functools.lru_cache(maxsize=None)
+def _load_monkey_data():
+    import matchingp.dataset as _mp      # imported inside → no cell dependency
+    import matchingp.features as _mpf
+    data = _mp.load_data(data_type='monkeyMP')
+    data = _mpf.cal_entropy_and_mutual_info(data, ...)
+    return data
+
+@functools.lru_cache(maxsize=None)
+def _load_mouse_data():
+    ...
+
+return _load_monkey_data, _load_mouse_data
+```
+
+Then in downstream cells, call the loader to get the data:
+
+```python
+# monkey data cell  —  def _(_load_monkey_data, np, plt, sstats):
+monkey_data = _load_monkey_data()   # instant on second call
+```
+
+**Why this helps**: when the imports cell changes (e.g. you add a new import), marimo cascades the re-run to all downstream cells. Without caching, every data cell would reload from disk. With `@lru_cache` on a function defined in a no-input cell, the function object is the same across re-runs of downstream cells, so the cache is still warm and the reload is skipped.
+
+### Per-panel preview
+
+`FigureComposer.preview_image` renders a single panel in isolation at the correct size, including all normalization steps. Put a preview call at the bottom of each panel cell:
+
+```python
+# panel b cell
+def plot_panel_b(ax):
+    ax.tick_params(bottom=True, left=True, labelbottom=True, labelleft=True)
+    plot_scatter(data, fig=ax.figure, ax=ax)
+
+_img = composer.preview_image('b', plot_func=plot_panel_b)
+_img          # marimo displays it inline
+```
+
+Editing `plot_panel_b` re-runs only this cell (and the compose cell). All other panels and all data cells are untouched.
+
+### Compose cell
+
+The compose cell is the only place where all panels come together. It re-runs whenever any `plot_panel_*` function changes, but not when data cells change:
+
+```python
+# compose cell  —  def _(composer, plot_panel_a, plot_panel_b, …):
+fig, axes = composer.compose()
+plot_panel_a(axes['a'])
+plot_panel_b(axes['b'])
+…
+_img = composer.to_image()
+_img
+```
+
+`composer.compose()` creates the grid, `to_image()` applies `normalize_fonts`, `normalize_spines`, and `normalize_linewidths` and returns a marimo-renderable image.
+
+### Normalization parameters
+
+All normalization is configured once on the `FigureComposer` and applied consistently across every panel:
+
+```python
+composer = splcompose.FigureComposer(
+    width_cm=18, height_cm=12.8,
+    stylesheet='mp-paper',
+    font_size=6.0,
+    spine_linewidth=0.7,
+    tick_linewidth=0.7,
+    tick_length=2.5,
+    line_linewidth=1.0,   # normalizes all data Line2D widths
+)
+composer.apply_style()
+```
+
+`apply_style()` loads the named stylesheet so all subsequent `plt` calls in panel cells inherit the correct defaults.
+
+
 ## Other fun stuff 
 
 I am also including other aesthetically pleasing plot styles that are non-academic. For example, to create plots from The Economist, do: 

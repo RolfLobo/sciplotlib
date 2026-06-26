@@ -710,7 +710,7 @@ class FigureComposer:
                  margins=None, axes_pad=None,
                  wspace=0.4, hspace=0.5,
                  spine_linewidth=None, tick_linewidth=None, tick_length=None,
-                 tick_pad=None, axis_label_pad=None):
+                 tick_pad=None, axis_label_pad=None, line_linewidth=None):
         self.width_cm = width_cm
         self.height_cm = height_cm
         self.grid_rows = grid_rows
@@ -735,6 +735,7 @@ class FigureComposer:
         self.tick_length = tick_length
         self.tick_pad = tick_pad
         self.axis_label_pad = axis_label_pad
+        self.line_linewidth = line_linewidth
         self.panels = []
         self._fig = None
         self._axes = None
@@ -951,6 +952,7 @@ class FigureComposer:
             self.normalize_fonts()
             self.fit_axes_to_cells()
             self.normalize_spines()
+            self.normalize_linewidths()
 
             # Hide every non-target axes so bbox_inches='tight' crops to just
             # this panel's content (colorbars, titles, tick labels included).
@@ -1168,6 +1170,42 @@ class FigureComposer:
         for ax in self._fig.get_axes():
             _apply(ax)
 
+    def normalize_linewidths(self):
+        """Normalize plot line widths across all axes to a consistent value.
+
+        Sets the linewidth of every ``Line2D`` data line to
+        ``self.line_linewidth``.  Tick lines, spines, and patch edges are
+        excluded (those are controlled by :meth:`normalize_spines`).
+
+        Only acts when *line_linewidth* was supplied to the constructor;
+        if it is ``None`` this method is a no-op so existing figures are
+        unaffected.
+
+        Called automatically by :meth:`to_image`, :meth:`save`, and the
+        preview/editor methods when *line_linewidth* is set.
+
+        Example
+        -------
+        ::
+
+            composer = FigureComposer(..., line_linewidth=1.0)
+            # … add panels, compose, plot …
+            composer.normalize_linewidths()   # or called automatically
+        """
+        if self._fig is None or self.line_linewidth is None:
+            return
+
+        lw = self.line_linewidth
+
+        def _apply(ax):
+            for line in ax.get_lines():
+                line.set_linewidth(lw)
+            for child in getattr(ax, 'child_axes', []):
+                _apply(child)
+
+        for ax in self._fig.get_axes():
+            _apply(ax)
+
     @staticmethod
     def _fit_single_ax(fig, ax, cell_bounds, n_iterations=3):
         """Apply the fit_axes_to_cells logic to a single axes.
@@ -1333,6 +1371,224 @@ class FigureComposer:
         self.fit_axes_to_cells()
         self.normalize_spines()
         return figure_to_image(self._fig, width=width, dpi=self.dpi, **kwargs)
+
+    def launch_editor(self, patch_types=None):
+        """Normalize the figure and open the interactive drag-position editor.
+
+        Applies :meth:`normalize_fonts`, :meth:`fit_axes_to_cells`, and
+        :meth:`normalize_spines` before opening the window, so what you see
+        in the editor is pixel-identical to the final PDF/SVG output.
+        Blocks until the editor window is closed.
+
+        Call this *after* composing and plotting all panels::
+
+            fig, axes = composer.compose()
+            plot_panel_a(axes['a'])
+            plot_panel_j(axes['j'])   # ... all panels
+            composer.launch_editor()  # adjust, close → paste coordinates back
+
+        Updated coordinates are printed to the terminal where marimo was
+        started.  Paste the ``.set_position`` / ``.xy`` / ``.set_xy`` values
+        back into your plotting functions and re-run.
+
+        Parameters
+        ----------
+        patch_types : tuple of type, optional
+            Patch subclasses to make draggable.  Defaults to
+            ``(Rectangle,)``.  Pass ``None`` to disable patch dragging.
+        """
+        if self._fig is None:
+            raise RuntimeError("Call compose() and plot all panels before launch_editor().")
+
+        self.normalize_fonts()
+        self.fit_axes_to_cells()
+        self.normalize_spines()
+
+        from sciplotlib.drag_editor import launch_editor as _launch
+        kw = {} if patch_types is None else {'patch_types': patch_types}
+        _launch(self._fig, **kw)
+
+    def launch_editor_panel(self, label, plot_func=None, patch_types=None,
+                            screen_dpi=96):
+        """Launch the drag editor for a single panel, matching ``normalize=True``.
+
+        Mirrors ``preview_image(label, normalize=True)`` exactly:
+
+        1. Composes the full figure with only *label* drawn (so
+           ``fit_axes_to_cells`` runs in the correct GridSpec context).
+        2. Applies all three normalisation passes (fonts, cell-fit, spines).
+        3. Crops the figure to just the panel's tight bounding box — the same
+           crop ``bbox_inches='tight'`` produces when saving the preview PNG.
+        4. Opens the interactive editor on the cropped figure.
+
+        You do **not** need to have plotted any other panels first.
+
+        Parameters
+        ----------
+        label : str
+            Panel label to edit, e.g. ``'j'``.
+        plot_func : callable, optional
+            ``plot_func(ax)`` to draw the panel.  Falls back to the
+            ``plot_func`` registered via :meth:`add_panel` if not given.
+        patch_types : tuple of type, optional
+            Patch subclasses to make draggable.  Defaults to
+            ``(Rectangle,)``.  Pass ``None`` to disable patch dragging.
+        screen_dpi : int, optional
+            DPI for the interactive window (default 96).  The composer's
+            ``dpi`` (e.g. 300) is used for layout, then lowered to this
+            value before opening so the window fits comfortably on screen.
+
+        Usage::
+
+            composer.launch_editor_panel('j', plot_func=plot_panel_j)
+            # or, if plot_func was registered with add_panel:
+            composer.launch_editor_panel('j')
+        """
+        from matplotlib.transforms import Bbox
+
+        p_def = next((p for p in self.panels if p['label'] == label), None)
+        if p_def is None:
+            raise ValueError(f"No panel with label '{label}'")
+
+        _plot_func = plot_func if plot_func is not None else p_def.get('plot_func')
+        if _plot_func is None:
+            raise ValueError(
+                f"No plot_func for panel '{label}'. "
+                f"Pass plot_func=... or register it via add_panel(plot_func=...)."
+            )
+
+        # ── Step 1: compose full figure with only the target panel drawn ──────
+        # (same as _normalized_preview_image so fit_axes_to_cells has full context)
+        snapshot = {p['label']: p.get('plot_func') for p in self.panels}
+        for p in self.panels:
+            if p['label'] != label:
+                p.pop('plot_func', None)
+            elif _plot_func is not None:
+                p['plot_func'] = _plot_func
+
+        try:
+            fig, axes = self.compose()
+            self.normalize_fonts()
+            self.fit_axes_to_cells()
+            self.normalize_spines()
+            self.normalize_linewidths()
+
+            # ── Step 2: hide non-target panels ────────────────────────────────
+            all_labels = {p.get('label', '') for p in self.panels if p.get('label')}
+            for lbl, ax in axes.items():
+                if lbl != label:
+                    ax.set_visible(False)
+            for text_obj in fig.texts:
+                if text_obj.get_text() in all_labels - {label}:
+                    text_obj.set_visible(False)
+
+            # ── Step 3: compute tight bbox in display (pixel) coordinates ───────
+            # We deliberately avoid fig.get_tightbbox(), which returns a
+            # TransformedBbox in inches rather than display pixels, causing a
+            # unit mismatch when unioned with ax.get_tightbbox() values.
+            # Instead, collect ax.get_tightbbox() (always display pixels) from
+            # every visible axes, recursing into child_axes.
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+
+            target_ax = axes[label]
+            bboxes = []
+            seen_ids: set[int] = set()
+
+            def _collect_bboxes(a):
+                if id(a) in seen_ids or not a.get_visible():
+                    return
+                seen_ids.add(id(a))
+                bb = a.get_tightbbox(renderer)
+                if bb is not None:
+                    bboxes.append(bb.frozen())
+                for child in getattr(a, 'child_axes', []):
+                    _collect_bboxes(child)
+
+            for ax in fig.get_axes():
+                _collect_bboxes(ax)
+
+            # Include visible figure-level text (panel letter label)
+            for text_obj in fig.texts:
+                if text_obj.get_visible():
+                    bb = text_obj.get_window_extent(renderer)
+                    if bb is not None:
+                        bboxes.append(bb.frozen())
+
+            # ── Step 4: crop figure to the tight bbox ─────────────────────────
+            if bboxes:
+                crop = Bbox.union(bboxes)
+                fig_w, fig_h = fig.get_size_inches()
+                fig_dpi = fig.get_dpi()
+
+                # Use the same padding as bbox_inches='tight' so that
+                # element positions match the preview image exactly.
+                pad_px = plt.rcParams.get('savefig.pad_inches', 0.1) * fig_dpi
+                x0f = max(0.0, (crop.x0 - pad_px) / (fig_w * fig_dpi))
+                y0f = max(0.0, (crop.y0 - pad_px) / (fig_h * fig_dpi))
+                x1f = min(1.0, (crop.x1 + pad_px) / (fig_w * fig_dpi))
+                y1f = min(1.0, (crop.y1 + pad_px) / (fig_h * fig_dpi))
+
+                if x1f > x0f and y1f > y0f:
+                    def _remap(a):
+                        # get_position() returns the locator-computed position
+                        # after the canvas.draw() call above — use that.
+                        pos = a.get_position()
+                        # Detach any InsetPosition locator BEFORE set_position so
+                        # it cannot re-fire on the next draw (window resize etc.)
+                        # and double-remap the child relative to the already-
+                        # remapped parent.
+                        try:
+                            a.set_axes_locator(None)
+                        except Exception:
+                            pass
+                        a.set_position([
+                            (pos.x0 - x0f) / (x1f - x0f),
+                            (pos.y0 - y0f) / (y1f - y0f),
+                            pos.width  / (x1f - x0f),
+                            pos.height / (y1f - y0f),
+                        ])
+                        for child in getattr(a, 'child_axes', []):
+                            _remap(child)
+                    _remap(target_ax)
+
+                    for text_obj in fig.texts:
+                        if text_obj.get_visible():
+                            tx, ty = text_obj.get_position()
+                            text_obj.set_position((
+                                (tx - x0f) / (x1f - x0f),
+                                (ty - y0f) / (y1f - y0f),
+                            ))
+
+                    new_w_in = (x1f - x0f) * fig_w
+                    new_h_in = (y1f - y0f) * fig_h
+
+                    # Scale the figure up in inches (DPI stays fixed so
+                    # fonts/spines stay at print size) so the GTK window
+                    # is comfortably large on screen.
+                    longest_in = max(new_w_in, new_h_in)
+                    target_px = max(screen_dpi * 14, 1200)  # ≥14" or 1200px
+                    scale = max(1.0, target_px / (longest_in * fig_dpi))
+                    fig.set_size_inches(new_w_in * scale, new_h_in * scale)
+                    fig.set_dpi(fig_dpi)
+                else:
+                    fig.set_dpi(screen_dpi)
+            else:
+                fig.set_dpi(screen_dpi)
+
+            from sciplotlib.drag_editor import launch_editor as _launch
+            kw = {} if patch_types is None else {'patch_types': patch_types}
+            _launch(fig, **kw)
+
+        finally:
+            plt.close(self._fig) if self._fig is not None else None
+            self._fig = None
+            for p in self.panels:
+                saved = snapshot.get(p['label'])
+                if saved is not None:
+                    p['plot_func'] = saved
+                else:
+                    p.pop('plot_func', None)
 
     def save(self, path, formats=('pdf', 'svg'), dpi=None, transparent=True):
         """Save the composed figure to one or more file formats."""
