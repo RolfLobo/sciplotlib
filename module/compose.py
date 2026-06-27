@@ -874,7 +874,7 @@ class FigureComposer:
         return fig, ax
 
     def preview_image(self, label, wspace=None, hspace=None, plot_func=None,
-                      normalize=False, show_label=True,
+                      normalize=True, show_label=True,
                       width=None, pad_inches=(2.0, 1.0), **kwargs):
         """Create a preview of a panel and return it as a marimo-compatible HTML image.
 
@@ -1309,16 +1309,16 @@ class FigureComposer:
                     pos.width - dl - dr, pos.height - db - dt,
                 ])
 
-        # Align panels that share a grid row to the same y0 and height.
-        # Uses the most-constrained panel (highest y0, lowest y1) as reference
-        # so all siblings in the row match.
+        # Align panels that share the same grid row extent to the same y0 and height.
+        # Group by (start_row, end_row) so panels with different rowspans that happen
+        # to share a starting row are not incorrectly resized to match each other.
         from collections import defaultdict
         row_groups = defaultdict(list)
         for p in self.panels:
             label = p.get('label', '')
             if not label or label not in self._axes:
                 continue
-            row_groups[p['row']].append(label)
+            row_groups[(p['row'], p['row'] + p['rowspan'])].append(label)
 
         for row_labels in row_groups.values():
             if len(row_labels) < 2:
@@ -1330,7 +1330,9 @@ class FigureComposer:
                 pos = self._axes[l].get_position()
                 self._axes[l].set_position([pos.x0, max_y0, pos.width, min_y1 - max_y0])
 
-        # Align panels that share a grid column to the same x0.
+        # Align panels that share the same grid column extent to the same x0.
+        # Group by (start_col, end_col) so panels with different colspans that happen
+        # to share a starting column are not incorrectly shifted against each other.
         col_groups = defaultdict(list)
         for p in self.panels:
             label = p.get('label', '')
@@ -1339,7 +1341,7 @@ class FigureComposer:
             ax = self._axes[label]
             if not ax.axison:
                 continue
-            col_groups[p['col']].append(label)
+            col_groups[(p['col'], p['col'] + p['colspan'])].append(label)
 
         for col_labels in col_groups.values():
             if len(col_labels) < 2:
