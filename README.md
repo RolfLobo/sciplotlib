@@ -314,6 +314,65 @@ composer.apply_style()
 `apply_style()` loads the named stylesheet so all subsequent `plt` calls in panel cells inherit the correct defaults.
 
 
+### Stats report
+
+`FigureComposer` can generate a statistics summary document alongside the figure — useful for keeping track of which tests were run and where results came from. Call `register_stats` in each panel cell, then `save_stats_report` in the save cell.
+
+```python
+# panel d cell — after defining plot_panel_d:
+composer.register_stats('d', [
+    {
+        'description': 'GLM-HMM (5-state) vs LR log-likelihood',
+        'test': 'Wilcoxon signed-rank',
+        'statistic': 28.0,
+        'p_value': 0.031,
+        'n': 3,
+    },
+])
+
+# schematic or count panels with no tests:
+composer.register_stats('b', None)
+composer.register_stats('c', None)
+
+# save cell — alongside composer.save():
+composer.save_stats_report('reports/figures/figure-4-stats', title='Figure 4 Extended')
+# → writes figure-4-stats.md and figure-4-stats.pdf
+```
+
+Each stat entry is a plain dict; all keys are optional:
+
+| Key | Description |
+|-----|-------------|
+| `description` | Human-readable label for the comparison |
+| `test` | Test name (e.g. `'Wilcoxon signed-rank'`) |
+| `statistic` | Test statistic value |
+| `p_value` | p-value |
+| `n` | Sample size |
+| `effect_size` | Effect size (e.g. Cohen's d) |
+| `ci` | Confidence interval, e.g. `(0.12, 0.88)` |
+| `note` | Free-text note |
+
+`register_stats` distinguishes three states in the report:
+
+- **list of entries** — renders each test with its statistics
+- **`None`** — marks the panel as "no statistical tests apply" (schematics, count plots)
+- **not called** — marked as "stats not yet registered", useful for tracking coverage gaps
+
+The Markdown file is always written. The PDF backend is chosen automatically in priority order:
+
+1. **weasyprint** — highest quality; requires `pip install sciplotlib[stats-pdf]` plus system cairo/pango libraries (see [weasyprint installation docs](https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#installation))
+2. **pandoc** — good quality if `pandoc` is on your PATH
+3. **matplotlib** — always available as a fallback; no extra dependencies
+
+To install the high-quality PDF backend:
+
+```bash
+pip install sciplotlib[stats-pdf]
+# also requires system libraries, e.g. on Debian/Ubuntu:
+# apt install libcairo2 libpango-1.0-0 libpangocairo-1.0-0
+```
+
+
 ## Other fun stuff 
 
 I am also including other aesthetically pleasing plot styles that are non-academic. For example, to create plots from The Economist, do: 

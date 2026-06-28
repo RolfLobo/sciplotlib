@@ -18,6 +18,20 @@ import yaml
 from copy import copy
 
 
+_UNREGISTERED = object()   # internal sentinel: register_stats was never called
+
+NOT_APPLICABLE = object()
+"""Sentinel for :meth:`FigureComposer.register_stats`.
+
+Pass this instead of ``None`` to mark a panel as intentionally having no
+statistical tests (e.g. schematics, count plots).  ``None`` is accepted as
+an alias for backwards compatibility.
+
+Example::
+
+    composer.register_stats('b', splcompose.NOT_APPLICABLE)
+"""
+
 PAPER_DIMENSIONS = {
     'a4': (21.0, 29.7),
     'a4_half_portrait': (10.5, 29.7),
@@ -686,6 +700,136 @@ def render_panels_to_figure(panels, grid_rows, grid_cols, fig,
 
 
 # ---------------------------------------------------------------------------
+# Stats report PDF helpers
+# ---------------------------------------------------------------------------
+
+def _write_stats_pdf(md_text, pdf_path):
+    """Write *md_text* as a PDF, trying the best available backend."""
+    # 1. weasyprint (markdown → HTML → PDF, best quality)
+    try:
+        import markdown as _md
+        import weasyprint as _wp
+        _html_body = _md.markdown(md_text, extensions=['tables'])
+        _css = (
+            'body{font-family:Arial,sans-serif;margin:2cm;font-size:10pt}'
+            'h1{font-size:16pt;border-bottom:1px solid #555}'
+            'h2{font-size:12pt;border-bottom:1px solid #aaa;margin-top:1.5em}'
+            'li{margin:3px 0}em{color:#555}'
+        )
+        _full = f'<html><head><style>{_css}</style></head><body>{_html_body}</body></html>'
+        _wp.HTML(string=_full).write_pdf(str(pdf_path))
+        return
+    except ImportError:
+        pass
+
+    # 2. pandoc (subprocess, second-best quality)
+    try:
+        import subprocess as _sp
+        _r = _sp.run(
+            ['pandoc', '--from=markdown', '--to=pdf', '-o', str(pdf_path)],
+            input=md_text.encode(),
+            capture_output=True,
+        )
+        if _r.returncode == 0:
+            return
+    except FileNotFoundError:
+        pass
+
+    # 3. matplotlib fallback — always available
+    _render_stats_pdf_matplotlib(md_text, pdf_path)
+
+
+def _render_stats_pdf_matplotlib(md_text, pdf_path):
+    """Render a Markdown stats report to PDF using matplotlib's PDF backend."""
+    import re
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    PAGE_W, PAGE_H = 8.27, 11.69   # A4 inches
+    LX = 0.07                        # left margin in axes fraction
+    TOP_Y = 0.95
+    LINE_H = 0.026                   # normal line height (axes fraction)
+    H2_EXTRA = 0.008                 # extra gap before a section heading
+    BULLET_INDENT = 0.025
+
+    _STRIP_INLINE = re.compile(r'\*\*(.*?)\*\*|\*(.*?)\*|`(.*?)`')
+
+    def _clean(text):
+        return _STRIP_INLINE.sub(lambda m: m.group(1) or m.group(2) or m.group(3), text)
+
+    lines = md_text.split('\n')
+    # Simple word-wrap at ~95 chars
+    wrapped = []
+    for raw in lines:
+        if raw.startswith('#') or raw.startswith('-') or raw.startswith('*') or not raw.strip():
+            wrapped.append(raw)
+        elif len(raw) > 95:
+            words = raw.split()
+            buf = ''
+            for w in words:
+                if len(buf) + len(w) + 1 <= 95:
+                    buf = (buf + ' ' + w).lstrip()
+                else:
+                    wrapped.append(buf)
+                    buf = w
+            if buf:
+                wrapped.append(buf)
+        else:
+            wrapped.append(raw)
+
+    with PdfPages(pdf_path) as pdf:
+        fig, ax = plt.subplots(figsize=(PAGE_W, PAGE_H))
+        ax.axis('off')
+        y = TOP_Y
+
+        def _flush():
+            nonlocal fig, ax, y
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+            fig, ax = plt.subplots(figsize=(PAGE_W, PAGE_H))
+            ax.axis('off')
+            y = TOP_Y
+
+        for raw in wrapped:
+            if y < 0.05:
+                _flush()
+
+            if raw.startswith('# '):
+                text = _clean(raw[2:])
+                ax.text(LX, y, text, transform=ax.transAxes,
+                        fontsize=15, fontweight='bold', va='top', color='#111111')
+                y -= LINE_H * 1.8
+
+            elif raw.startswith('## '):
+                y -= H2_EXTRA
+                text = _clean(raw[3:])
+                ax.text(LX, y, text, transform=ax.transAxes,
+                        fontsize=11, fontweight='bold', va='top', color='#222222')
+                y -= LINE_H * 1.5
+
+            elif raw.startswith('- ') or raw.startswith('* '):
+                text = _clean(raw[2:])
+                ax.text(LX + BULLET_INDENT, y, f'•  {text}',
+                        transform=ax.transAxes,
+                        fontsize=9, va='top', color='#333333')
+                y -= LINE_H
+
+            elif not raw.strip():
+                y -= LINE_H * 0.45
+
+            else:
+                text = _clean(raw)
+                italic = raw.startswith('*') and raw.rstrip().endswith('*')
+                ax.text(LX, y, text.strip('*').strip('_'),
+                        transform=ax.transAxes,
+                        fontsize=9, va='top', color='#444444',
+                        style='italic' if italic else 'normal')
+                y -= LINE_H
+
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # High-level Python API
 # ---------------------------------------------------------------------------
 
@@ -739,6 +883,7 @@ class FigureComposer:
         self.panels = []
         self._fig = None
         self._axes = None
+        self._stats = {}
 
     def apply_style(self):
         """Apply the composer's stylesheet and rc_params globally.
@@ -816,6 +961,157 @@ class FigureComposer:
             'plot_func': plot_func,
         })
         return self
+
+    def register_stats(self, label, stats):
+        """Register statistical results for a panel.
+
+        Parameters
+        ----------
+        label : str
+            Panel label (e.g. ``'d'``).
+        stats : list of dict or None
+            A list of stat entries, each a dict with any subset of:
+            ``description``, ``test``, ``statistic``, ``p_value``,
+            ``n``, ``effect_size``, ``ci``, ``note``.
+            Pass ``None`` to explicitly mark the panel as having no
+            applicable statistical tests (e.g. schematics).
+
+        Examples
+        --------
+        >>> composer.register_stats('d', [
+        ...     {'description': 'GLM-HMM vs LR log-likelihood',
+        ...      'test': 'Wilcoxon signed-rank',
+        ...      'statistic': 28.0, 'p_value': 0.031, 'n': 3},
+        ... ])
+        >>> composer.register_stats('b', None)   # schematic — no tests
+        """
+        self._stats[label] = stats
+        return self
+
+    def to_stats_markdown(self, title=''):
+        """Return a Markdown string summarising stats for all panels.
+
+        Panels are listed in the order they were added via ``add_panel``.
+        Three states are distinguished:
+
+        * **registered list** -- one subsection per stat entry.
+        * **``NOT_APPLICABLE`` / ``None``** -- intentionally no tests (schematic etc.).
+        * **not registered** -- panel not yet assessed.
+        """
+        from datetime import date
+
+        def _fmt_stat(x):
+            if x is None:
+                return None
+            try:
+                return f'{float(x):.3g}'
+            except (TypeError, ValueError):
+                return str(x)
+
+        def _fmt_pval(x):
+            if x is None:
+                return None
+            try:
+                p = float(x)
+                if p < 0.001:
+                    return f'{p:.2e}'
+                return f'{p:.3f}'
+            except (TypeError, ValueError):
+                return str(x)
+
+        lines = []
+        header = f'Statistics — {title}' if title else 'Statistics Report'
+        lines.append(f'# {header}')
+        lines.append('')
+        lines.append(f'Generated: {date.today().isoformat()}')
+        lines.append('')
+
+        for p in self.panels:
+            lbl = p.get('label', '')
+            if not lbl:
+                continue
+            lines.append(f'## Panel {lbl}')
+            lines.append('')
+
+            val = self._stats.get(lbl, _UNREGISTERED)
+            if val is _UNREGISTERED:
+                lines.append('*(stats not yet registered)*')
+            elif val is NOT_APPLICABLE or val is None:
+                lines.append('*Not applicable -- no statistical tests for this panel type.*')
+            else:
+                entries = val
+                if not entries:
+                    lines.append('*(no entries)*')
+                for entry in entries:
+                    desc = entry.get('description', '')
+                    test = entry.get('test', '')
+                    stat = _fmt_stat(entry.get('statistic'))
+                    pval = _fmt_pval(entry.get('p_value'))
+                    n    = entry.get('n')
+                    eff  = _fmt_stat(entry.get('effect_size'))
+                    ci   = entry.get('ci')
+                    note = entry.get('note', '')
+
+                    if desc:
+                        lines.append(f'**{desc}**')
+                    if test:
+                        lines.append(f'- Test: {test}')
+
+                    detail_parts = []
+                    if stat is not None:
+                        detail_parts.append(f'statistic = {stat}')
+                    if pval is not None:
+                        detail_parts.append(f'p = {pval}')
+                    if n is not None:
+                        detail_parts.append(f'n = {n}')
+                    if eff is not None:
+                        detail_parts.append(f'effect size = {eff}')
+                    if ci is not None:
+                        detail_parts.append(f'95 % CI = {ci}')
+                    if detail_parts:
+                        lines.append(f'- {", ".join(detail_parts)}')
+                    if note:
+                        lines.append(f'- Note: {note}')
+                    lines.append('')
+
+            lines.append('')
+
+        return '\n'.join(lines)
+
+    def save_stats_report(self, path, title=''):
+        """Write a stats report as both ``.md`` and ``.pdf``.
+
+        The Markdown file is always written.  The PDF is generated by the
+        best available backend in order: ``weasyprint``, ``pandoc``
+        (subprocess), then a pure-matplotlib fallback that requires no
+        extra dependencies.
+
+        Parameters
+        ----------
+        path : str or Path
+            Output path, with or without extension.  Both
+            ``path.md`` and ``path.pdf`` are created.
+        title : str
+            Optional figure title shown at the top of the report.
+
+        Returns
+        -------
+        md_path, pdf_path : Path
+        """
+        p = Path(path).with_suffix('')
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        md_text = self.to_stats_markdown(title=title)
+
+        md_path = p.with_suffix('.md')
+        md_path.write_text(md_text, encoding='utf-8')
+        print(f'Saved: {md_path}')
+
+        pdf_path = p.with_suffix('.pdf')
+        _write_stats_pdf(md_text, pdf_path)
+        print(f'Saved: {pdf_path}')
+
+        return md_path, pdf_path
 
     def panel_figsize(self, label, wspace=None, hspace=None):
         """Return (width_inches, height_inches) for a panel, matching

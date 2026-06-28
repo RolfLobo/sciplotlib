@@ -1,0 +1,26 @@
+# sciplotlib
+
+sciplotlib is a Python library for composing publication-quality multi-panel matplotlib figures. Its primary API is `FigureComposer`, a grid-based layout engine designed for use in marimo reactive notebooks. It also provides style utilities, significance bar drawing, and an auto-generated statistics report alongside the figure.
+
+## Documentation
+
+- [CLAUDE.md](CLAUDE.md) — Full LLM-oriented reference: FigureComposer API, marimo integration patterns, add_significance_bars, stylesheets, and known gotchas. **Start here.**
+- [README.md](README.md) — User-facing overview: stylesheets, FigureComposer quickstart, marimo cell structure, stats report, installation.
+- [pyproject.toml](pyproject.toml) — Dependencies and optional extras (`layout`, `notebooks`, `svg`, `stats-pdf`).
+
+## Key concepts
+
+- `FigureComposer` (`sciplotlib.compose`) — create a grid, add named panels, compose, normalise, save. All normalisation parameters (font sizes, spine width, tick length, line width) are set once on the composer and applied uniformly.
+- `add_significance_bars` (`sciplotlib.text`) — draw stacked significance brackets between x-positions, with automatic star conversion and ylim expansion.
+- `register_stats` / `save_stats_report` — attach statistical results to individual panels and export a Markdown + PDF summary document alongside the figure.
+- Stylesheets — named `.mplstyle` files (`nature-reviews`, `mp-paper`, `economist`, etc.) applied via `composer.apply_style()` or `plt.style.context(splstyle.get_style(...))`.
+- marimo pattern — each panel lives in its own reactive cell; data loaders use `@functools.lru_cache` in a no-input cell to avoid re-running on upstream changes.
+
+## Optional extras
+
+```bash
+pip install sciplotlib[stats-pdf]   # weasyprint + markdown for high-quality PDF stats reports
+pip install sciplotlib[layout]      # GUI layout editor (ttkbootstrap, rich, typer)
+pip install sciplotlib[notebooks]   # marimo + scipy
+pip install sciplotlib[svg]         # SVG panel rendering (requires system cairo)
+```

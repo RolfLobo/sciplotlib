@@ -37,9 +37,14 @@ notebooks = [
 svg = [
     "cairosvg",
 ]
+# High-quality stats report PDF (requires system cairo/pango; see weasyprint docs)
+stats-pdf = [
+    "weasyprint",
+    "markdown",
+]
 # Everything for local development
 dev = [
-    "sciplotlib[layout,notebooks,svg]",
+    "sciplotlib[layout,notebooks,svg,stats-pdf]",
 ]
 
 [build-system]
